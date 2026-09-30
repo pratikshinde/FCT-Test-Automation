@@ -1,0 +1,174 @@
+// Data model per planner.md Section 6.2.
+// Only Customer / User / Station / Board / TestRun / DailyStats are populated/queried
+// in this pass (Admin Overview page) — TestStep / SyncGap / AuditLog are modeled now
+// so later phases (ingest, integrity page, audit log) don't need a schema rework.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  ADMIN
+  CUSTOMER_SUPERVISOR
+  OPERATOR
+}
+
+enum Verdict {
+  PASS
+  FAIL
+  FIXTURE_FAULT
+}
+
+enum CustomerStatus {
+  ACTIVE
+  SUSPENDED
+}
+
+model Customer {
+  id        String         @id @default(cuid())
+  name      String
+  status    CustomerStatus @default(ACTIVE)
+  createdAt DateTime       @default(now()) @map("created_at")
+
+  users            User[]
+  stations         Station[]
+  boardsFirstSeen  Board[]     @relation("BoardFirstCustomer")
+  testRuns         TestRun[]
+  dailyStats       DailyStats[]
+
+  @@map("customers")
+}
+
+model User {
+  id           String   @id @default(cuid())
+  customerId   String?  @map("customer_id")
+  email        String   @unique
+  passwordHash String   @map("password_hash")
+  role         Role
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  customer Customer? @relation(fields: [customerId], references: [id])
+  testRuns TestRun[] @relation("Operator")
+
+  @@map("users")
+}
+
+model Station {
+  id              String    @id
+  customerId      String    @map("customer_id")
+  publicKey       String    @map("public_key")
+  firmwareVersion String    @map("firmware_version")
+  lastSeen        DateTime? @map("last_seen")
+  lastSeq         Int       @default(0) @map("last_seq")
+
+  customer  Customer   @relation(fields: [customerId], references: [id])
+  testRuns  TestRun[]
+  syncGaps  SyncGap[]
+
+  @@map("stations")
+}
+
+model Board {
+  uid              String    @id
+  variant          String
+  firstCustomerId  String    @map("first_customer_id")
+  firstTestedAt    DateTime  @map("first_tested_at")
+  lastVerdict      Verdict?  @map("last_verdict")
+  attemptCount     Int       @default(0) @map("attempt_count")
+
+  firstCustomer Customer  @relation("BoardFirstCustomer", fields: [firstCustomerId], references: [id])
+  testRuns      TestRun[]
+
+  @@map("boards")
+}
+
+model TestRun {
+  id             String   @id @default(cuid())
+  stationId      String   @map("station_id")
+  seq            Int
+  customerId     String   @map("customer_id")
+  boardUid       String   @map("board_uid")
+  serial         String
+  variant        String
+  attemptNo      Int      @map("attempt_no")
+  verdict        Verdict
+  locked         Boolean  @default(false)
+  startedAt      DateTime @map("started_at")
+  durationMs     Int      @map("duration_ms")
+  operatorId     String   @map("operator_id")
+  programSha256  String   @map("program_sha256")
+  planSha256     String   @map("plan_sha256")
+  planVersion    String   @map("plan_version")
+  isGolden       Boolean  @default(false) @map("is_golden")
+
+  station  Station   @relation(fields: [stationId], references: [id])
+  customer Customer  @relation(fields: [customerId], references: [id])
+  board    Board     @relation(fields: [boardUid], references: [uid])
+  operator User      @relation("Operator", fields: [operatorId], references: [id])
+  steps    TestStep[]
+
+  @@unique([stationId, seq])
+  @@map("test_runs")
+}
+
+model TestStep {
+  id         String   @id @default(cuid())
+  runId      String   @map("run_id")
+  stepId     String   @map("step_id")
+  block      String
+  value      Float
+  unit       String
+  min        Float
+  max        Float
+  verdict    Verdict
+  durationMs Int      @map("duration_ms")
+  suspects   String[]
+
+  run TestRun @relation(fields: [runId], references: [id])
+
+  @@map("test_steps")
+}
+
+model DailyStats {
+  customerId    String   @map("customer_id")
+  day           DateTime @db.Date
+  runs          Int
+  uniqueBoards  Int      @map("unique_boards")
+  passed        Int
+  failed        Int
+  fixtureFaults Int      @map("fixture_faults")
+
+  customer Customer @relation(fields: [customerId], references: [id])
+
+  @@id([customerId, day])
+  @@map("daily_stats")
+}
+
+model SyncGap {
+  id         String    @id @default(cuid())
+  stationId  String    @map("station_id")
+  fromSeq    Int       @map("from_seq")
+  toSeq      Int       @map("to_seq")
+  detectedAt DateTime  @default(now()) @map("detected_at")
+  resolvedAt DateTime? @map("resolved_at")
+
+  station Station @relation(fields: [stationId], references: [id])
+
+  @@map("sync_gaps")
+}
+
+model AuditLog {
+  id      String   @id @default(cuid())
+  actor   String
+  action  String
+  target  String
+  details Json?
+  time    DateTime @default(now())
+
+  @@map("audit_log")
+}

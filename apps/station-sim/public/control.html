@@ -1,0 +1,219 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Station Simulator Control</title>
+<style>
+  :root { color-scheme: dark; }
+  body { font-family: ui-monospace, Consolas, monospace; background: #0a0a0a; color: #e5e5e5; margin: 0; padding: 24px; }
+  h1 { font-size: 18px; margin: 0 0 4px; }
+  h2 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.05em; color: #999; margin: 0 0 8px; }
+  .sub { color: #888; font-size: 13px; margin-bottom: 20px; }
+  .grid { display: grid; grid-template-columns: 360px 1fr; gap: 16px; align-items: start; }
+  .card { background: #141414; border: 1px solid #262626; border-radius: 8px; padding: 16px; margin-bottom: 16px; }
+  label { display: block; font-size: 12px; color: #999; margin: 10px 0 4px; }
+  input, select, textarea { width: 100%; box-sizing: border-box; background: #0a0a0a; border: 1px solid #333; color: #eee; border-radius: 4px; padding: 6px 8px; font-family: inherit; font-size: 13px; }
+  textarea { height: 140px; }
+  button { background: #262626; border: 1px solid #404040; color: #eee; border-radius: 4px; padding: 7px 12px; font-size: 13px; cursor: pointer; margin: 4px 6px 0 0; }
+  button:hover { background: #333; }
+  button:disabled { opacity: 0.4; cursor: not-allowed; }
+  .row { display: flex; flex-wrap: wrap; gap: 4px; }
+  .state { font-size: 22px; font-weight: 700; }
+  .state.ARMED, .state.PASS { color: #4ade80; }
+  .state.FAIL, .state.FIXTURE_FAULT { color: #f87171; }
+  .state.AWAIT_CONFIRM { color: #60a5fa; }
+  .state.RUNNING, .state.PROGRAMMING, .state.LOADING { color: #fbbf24; }
+  #log { background: #000; border: 1px solid #262626; border-radius: 8px; padding: 10px; height: 560px; overflow-y: auto; font-size: 12px; line-height: 1.5; }
+  .ev { margin-bottom: 2px; }
+  .ev .t { color: #666; }
+  .ev .type { color: #60a5fa; }
+  pre { white-space: pre-wrap; word-break: break-all; margin: 4px 0; }
+</style>
+</head>
+<body>
+<h1>FCT Station Simulator</h1>
+<div class="sub" id="subtitle">loading...</div>
+
+<div class="grid">
+  <div>
+    <div class="card">
+      <h2>Station</h2>
+      <div>State: <span id="state" class="state">-</span></div>
+      <div>Pairing code: <b id="pairingCode">-</b></div>
+      <div>Board: <span id="boardInfo">none</span></div>
+    </div>
+
+    <div class="card">
+      <h2>1. Pair</h2>
+      <button id="pairBtn">Pair with this station</button>
+      <div id="pairStatus" class="sub"></div>
+    </div>
+
+    <div class="card">
+      <h2>2. Board</h2>
+      <label>Board UID (blank = random)</label>
+      <input id="boardUid" placeholder="auto" />
+      <label>Board-ID resistance (ohms)</label>
+      <input id="boardIdOhms" value="1200" />
+      <label>Variant</label>
+      <input id="variant" value="WLC-ECO" />
+      <div class="row">
+        <button id="placeBoardBtn">Place board</button>
+        <button id="removeBoardBtn">Remove board</button>
+        <button id="unlockBtn">Supervisor unlock</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>3. Session</h2>
+      <label>Scenario</label>
+      <select id="scenario"></select>
+      <label>Test plan (JSON)</label>
+      <textarea id="plan"></textarea>
+      <div class="row">
+        <button id="createSessionBtn">Create session</button>
+        <button id="uploadPlanBtn" disabled>Upload plan</button>
+        <button id="uploadProgramBtn" disabled>Upload program</button>
+        <button id="startBtn" disabled>START</button>
+      </div>
+      <div class="row">
+        <button id="confirmBtn" disabled>CONFIRM</button>
+        <button id="abortBtn" disabled>ABORT</button>
+        <button id="ackBtn" disabled>ACK</button>
+      </div>
+      <div id="sessionStatus" class="sub"></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Live events</h2>
+    <div id="log"></div>
+  </div>
+</div>
+
+<script>
+const DEFAULT_PLAN = {
+  schemaVersion: "1.0",
+  planVersion: "0.1.0",
+  variant: "WLC-ECO",
+  boardIdOhms: { min: 1000, max: 1500 },
+  sequence: [
+    { id: "S010", block: "LED_SCAN", unit: "V", min: 1.45, max: 2.0, ms: 400 },
+    { id: "S020", block: "RELAY_TEST", unit: "ohm", min: 0, max: 0.5, ms: 500 },
+    { id: "S030", block: "CONFIRM", unit: "bool", min: 1, max: 1, ms: 100 },
+    { id: "S040", block: "FINAL_CHECK", unit: "V", min: 3.0, max: 3.6, ms: 300 },
+  ],
+};
+
+let token = null;
+let sessionId = null;
+let ws = null;
+
+const $ = (id) => document.getElementById(id);
+$("plan").value = JSON.stringify(DEFAULT_PLAN, null, 2);
+
+function log(text, cls) {
+  const el = document.createElement("div");
+  el.className = "ev";
+  const time = new Date().toLocaleTimeString();
+  el.innerHTML = `<span class="t">${time}</span> ${cls ? `<span class="type">[${cls}]</span>` : ""} ${text}`;
+  $("log").prepend(el);
+}
+
+async function api(path, opts = {}) {
+  const headers = { ...(opts.headers || {}) };
+  if (opts.body) headers["Content-Type"] = "application/json";
+  if (token) headers.Authorization = `Bearer ${token}`;
+  const res = await fetch(path, { ...opts, headers });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(body.error ? JSON.stringify(body.error) : res.statusText);
+  return body;
+}
+
+async function refreshState() {
+  const snap = await api("/v1/control/state");
+  $("state").textContent = snap.state;
+  $("state").className = "state " + snap.state;
+  $("pairingCode").textContent = snap.pairingCode;
+  $("boardInfo").textContent = snap.board.present ? `${snap.board.boardUid} (${snap.board.boardIdOhms}Ω)` : "none";
+  const midSession = ["LOADING", "PROGRAMMING", "PROGRAMMED", "RUNNING", "AWAIT_CONFIRM"].includes(snap.state);
+  $("abortBtn").disabled = !midSession;
+  $("confirmBtn").disabled = snap.state !== "AWAIT_CONFIRM";
+  $("ackBtn").disabled = snap.state !== "FAIL";
+  $("uploadPlanBtn").disabled = snap.state !== "LOADING" || !sessionId;
+  $("uploadProgramBtn").disabled = snap.state !== "LOADING" || !sessionId;
+  $("startBtn").disabled = snap.state !== "PROGRAMMED";
+  $("createSessionBtn").disabled = snap.state !== "ARMED";
+}
+
+async function loadScenarios() {
+  const scenarios = await api("/v1/control/scenarios");
+  $("scenario").innerHTML = scenarios.map((s) => `<option value="${s}">${s}</option>`).join("");
+}
+
+$("scenario").addEventListener("change", () => {
+  $("boardIdOhms").value = $("scenario").value === "wrong_variant" ? "50" : "1200";
+});
+
+$("pairBtn").onclick = async () => {
+  const snap = await api("/v1/control/state");
+  const res = await api("/v1/pair", { method: "POST", body: JSON.stringify({ code: snap.pairingCode }) });
+  token = res.stationToken;
+  $("pairStatus").textContent = "Paired ✓";
+  connectWs();
+};
+
+$("placeBoardBtn").onclick = async () => {
+  await api("/v1/control/board", {
+    method: "POST",
+    body: JSON.stringify({
+      boardUid: $("boardUid").value || undefined,
+      boardIdOhms: Number($("boardIdOhms").value),
+      variant: $("variant").value,
+    }),
+  });
+  refreshState();
+};
+
+$("removeBoardBtn").onclick = async () => { await api("/v1/control/board/remove", { method: "POST" }); refreshState(); };
+$("unlockBtn").onclick = async () => { await api("/v1/control/unlock", { method: "POST" }); refreshState(); };
+
+$("createSessionBtn").onclick = async () => {
+  const res = await api("/v1/sessions", { method: "POST", body: JSON.stringify({ scenario: $("scenario").value, confirmTimeoutMs: 15000 }) });
+  sessionId = res.sessionId;
+  $("sessionStatus").textContent = `session ${sessionId} — attempt #${res.attemptNo}`;
+  refreshState();
+};
+
+$("uploadPlanBtn").onclick = async () => {
+  const plan = JSON.parse($("plan").value);
+  await api(`/v1/sessions/${sessionId}/plan`, { method: "PUT", body: JSON.stringify({ plan }) });
+  refreshState();
+};
+
+$("uploadProgramBtn").onclick = async () => {
+  await api(`/v1/sessions/${sessionId}/program`, { method: "PUT", body: JSON.stringify({ programSha256: "sha256:sim-" + Date.now() }) });
+  refreshState();
+};
+
+$("startBtn").onclick = async () => { await api(`/v1/sessions/${sessionId}/start`, { method: "POST" }); refreshState(); };
+$("confirmBtn").onclick = async () => { await api(`/v1/sessions/${sessionId}/confirm`, { method: "POST" }); refreshState(); };
+$("abortBtn").onclick = async () => { await api(`/v1/sessions/${sessionId}/abort`, { method: "POST" }); sessionId = null; refreshState(); };
+$("ackBtn").onclick = async () => { await api(`/v1/sessions/${sessionId}/ack`, { method: "POST" }); sessionId = null; refreshState(); };
+
+function connectWs() {
+  ws = new WebSocket(`ws://${location.host}/v1/events?token=${token}`);
+  ws.onmessage = (e) => {
+    const event = JSON.parse(e.data);
+    log(`<pre>${JSON.stringify(event)}</pre>`, event.type);
+    refreshState();
+  };
+  ws.onclose = () => log("WebSocket closed", "ws");
+}
+
+loadScenarios();
+refreshState();
+setInterval(refreshState, 2000);
+</script>
+</body>
+</html>

@@ -1,0 +1,22 @@
+{
+  "product": "WLC-ECO",
+  "stationId": "FCT-0001",
+  "boardVersion": "v1.2-PROEMBSYS",
+  "timestamp": "2026-09-24T14:18:00Z",
+  "testStages": [
+    "POWER_RAIL_3V3_CHECK",
+    "POWER_RAIL_5V0_CHECK",
+    "MCU_FLASH_PROGRAMMING",
+    "RELAY_CYCLE_TEST",
+    "WATER_SENSOR_CALIBRATION",
+    "MODBUS_UART_VERIFY"
+  ],
+  "limits": {
+    "vcc_3v3_min_v": 3.25,
+    "vcc_3v3_max_v": 3.35,
+    "vcc_5v0_min_v": 4.90,
+    "vcc_5v0_max_v": 5.10,
+    "quiescent_current_max_ma": 42.5,
+    "active_current_max_ma": 180.0
+  }
+}
